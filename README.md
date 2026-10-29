@@ -52,6 +52,8 @@ kd web
    sudo apt install curl python3 git jq
    sudo apt install nodejs npm      # only for the web interface (./run.sh); Node 18 or newer
    ```
+   Node from [nvm](https://github.com/nvm-sh/nvm) works too: when `npm` is not on the PATH (the top
+   bar icon starts without your shell profile), `run.sh` takes the newest `~/.nvm/versions/node/*`.
    EKS clusters: install the AWS CLI v2 (<https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html>).
    A local lab (optional): Docker + [k3d](https://k3d.io).
 2. Clone and install:
@@ -67,7 +69,10 @@ kd web
 
 **Top bar icon (optional):** `./tray_icon.py --install`. It runs on the system python3 and needs
 `sudo apt install python3-gi gir1.2-gtk-3.0 gir1.2-ayatanaappindicator3-0.1` (already on an Ubuntu
-desktop).
+desktop). Turning it on runs `./run.sh --no-browser`, which rebuilds the interface first when `ui/`
+changed. It did not start? The notification shows the last log line, and "View log" opens
+`~/.cache/devkit-kube-deck/server.log` (`the interface needs a rebuild, but npm is not installed`
+means no Node was found, neither on the PATH nor in `~/.nvm`).
 
 **Outside the repository:**
 

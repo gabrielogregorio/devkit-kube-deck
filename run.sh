@@ -67,6 +67,11 @@ elif [ -n "$(find "$root/ui/src" "$root/ui/index.html" "$root/ui/package.json" \
 fi
 
 if [ "$need_build" = 1 ]; then
+  # started from the top bar icon, the PATH has no nvm: take its newest node
+  if ! command -v npm >/dev/null; then
+    nvm_bin="$(printf '%s\n' "${NVM_DIR:-$HOME/.nvm}"/versions/node/*/bin | sort -V | tail -1)"
+    [ -d "$nvm_bin" ] && PATH="$nvm_bin:$PATH"
+  fi
   command -v npm >/dev/null || die "the interface needs a rebuild, but npm is not installed"
   msg "building the interface..."
   ( cd "$root/ui" && { [ -d node_modules ] || npm ci --silent; } && npm run build ) >/dev/null \

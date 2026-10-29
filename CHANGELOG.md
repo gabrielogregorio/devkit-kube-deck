@@ -28,6 +28,8 @@ A name is a weak signal, and a tool that writes in the lab teaches hands to writ
   `state`, `error`/`hint`...). The UI has i18n: English and Brazilian Portuguese.
 - `kd aws vincular`/`desvincular` became `kd aws link`/`unlink`; `kl mapa` became `kd map`.
 - Config moved to `~/.config/devkit-kube-deck/profiles.json`; the old `perfis.json` is read once.
+- `run.sh` finds Node from nvm when `npm` is not on the PATH. The top bar icon starts without the
+  shell profile, so after any `ui/` change its rebuild failed with "npm is not installed".
 - `kd info`, `kd log` & co. stopped with an empty pod name when no pod matched; now they exit 1.
 - Tests: pytest with a 100% coverage gate on the server, a CLI safety test, vitest for the UI and
   Playwright against the real server, all on a fake kubectl and a fake HOME.

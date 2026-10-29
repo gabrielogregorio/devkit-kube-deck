@@ -62,3 +62,7 @@ Agents never run `kd sh`, `kubectl exec` or anything that writes on a real clust
   `hard_failure` checks `forbidden` first.
 - `configparser.write()` drops comments; never use it on `~/.aws/*`.
 - `pgrep -f` inside a `bash -c` that contains the pattern matches the shell itself; kill by PID.
+- The top bar icon starts `run.sh` without the shell profile, so nvm's Node is not on the PATH.
+  `run.sh` falls back to the newest `~/.nvm/versions/node/*/bin`; keep that fallback, or every `ui/`
+  change leaves the icon failing with "npm is not installed". Test with the icon's PATH:
+  `tr '\0' '\n' < /proc/<icon pid>/environ | grep ^PATH=`.
