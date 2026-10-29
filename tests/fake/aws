@@ -1,0 +1,31 @@
+#!/usr/bin/env python3
+"""Fake aws CLI for the tests. Profile "good" is valid; anything else has an expired SSO session."""
+import json
+import sys
+
+argv = sys.argv[1:]
+profile = argv[argv.index("--profile") + 1] if "--profile" in argv else ""
+cmd = tuple(argv[:2])
+if cmd == ("sts", "get-caller-identity"):
+    if profile == "good":
+        print(json.dumps({"Account": "111122223333", "Arn": "arn:aws:sts::111122223333:assumed-role/r/x"}))
+        sys.exit(0)
+    if profile == "missing":
+        print("The config profile (missing) could not be found", file=sys.stderr)
+        sys.exit(255)
+    print("Error loading SSO Token: Token for x does not exist", file=sys.stderr)
+    sys.exit(255)
+if cmd == ("eks", "update-kubeconfig"):
+    name = argv[argv.index("--name") + 1]
+    if name == "broken":
+        print("An error occurred (ResourceNotFoundException): No cluster found", file=sys.stderr)
+        sys.exit(254)
+    alias = argv[argv.index("--alias") + 1] if "--alias" in argv else f"arn:aws:eks:us-west-2:111122223333:cluster/{name}"
+    print(f"Added new context {alias} to /tmp/fake/config")
+    sys.exit(0)
+if cmd == ("sso", "login"):
+    print("Attempting to open the browser")
+    print("Successfully logged into Start URL")
+    sys.exit(0)
+print("fake aws: unsupported", file=sys.stderr)
+sys.exit(2)

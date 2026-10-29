@@ -1,0 +1,52 @@
+# Kube Deck - k9s plugins, all read-only
+# copied to ~/.config/k9s/plugins.yaml by install.sh
+plugins:
+  stern:
+    shortCut: Ctrl-L
+    description: Logs of every replica (stern)
+    scopes:
+      - pods
+      - deployments
+    command: stern
+    background: false
+    args:
+      - --tail
+      - "100"
+      - -n
+      - $NAMESPACE
+      - $NAME
+
+  kd-info:
+    shortCut: Ctrl-I
+    description: Pod summary (kd info)
+    scopes:
+      - pods
+    command: sh
+    background: false
+    args:
+      - -c
+      - "kd info $NAME | less -R"
+
+  events:
+    shortCut: Ctrl-E
+    description: Events of the resource
+    scopes:
+      - pods
+      - deployments
+      - statefulsets
+    command: sh
+    background: false
+    args:
+      - -c
+      - "kubectl events -n $NAMESPACE --for $RESOURCE_NAME/$NAME | less -R"
+
+  clean-yaml:
+    shortCut: Ctrl-Y
+    description: YAML without managedFields
+    scopes:
+      - all
+    command: sh
+    background: false
+    args:
+      - -c
+      - "kubectl get $RESOURCE_NAME $NAME -n $NAMESPACE -o yaml | grep -v -E '^\\s+(managedFields|f:|k:|\\.:)' | less -R"

@@ -1,0 +1,728 @@
+#!/usr/bin/env bash
+# kd - Kube Deck
+# A light Kubernetes client: connect, see and look inside. kubectl underneath.
+# No server, no account, no license.
+set -uo pipefail
+
+VERSION="2.0.0"
+CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}"
+CFG_DIR="$CONFIG_HOME/devkit-kube-deck"
+KUBECFG="${KUBECONFIG:-$HOME/.kube/config}"
+# when KUBECONFIG has several paths, the first one is the writable one
+KUBECFG="${KUBECFG%%:*}"
+BACKUP_DIR="$HOME/.kube/kube-deck-backups"
+PROFILE_MAP="$CFG_DIR/profiles.json"
+# file of the old name of the project, read while the new one does not exist
+LEGACY_PROFILE_MAP="$CONFIG_HOME/kubelente/perfis.json"
+
+# ---------------------------------------------------------------------
+# SAFETY RULES OF THIS TOOL
+#   - every command reads, on any cluster;
+#   - `kd sh` (a shell inside a pod) is the only one that runs something in the
+#     cluster, and it asks for a confirmation typed at an interactive terminal;
+#   - there is no delete, scale, restart, apply, edit or patch. Not behind a flag,
+#     not behind a confirmation. Use kubectl directly, on purpose, for that.
+# ---------------------------------------------------------------------
+
+# ---------- colors ----------
+if [ -t 1 ]; then
+  B=$'\e[1m'; DIM=$'\e[2m'; R=$'\e[31m'; G=$'\e[32m'; Y=$'\e[33m'; C=$'\e[36m'; Z=$'\e[0m'
+else
+  B=''; DIM=''; R=''; G=''; Y=''; C=''; Z=''
+fi
+
+die()  { printf '%serror:%s %s\n' "$R" "$Z" "$*" >&2; exit 1; }
+warn() { printf '%swarning:%s %s\n' "$Y" "$Z" "$*" >&2; }
+ok()   { printf '%s✓%s %s\n' "$G" "$Z" "$*"; }
+hdr()  { printf '\n%s%s%s\n' "$B$C" "$*" "$Z"; }
+
+need() { command -v "$1" >/dev/null 2>&1 || die "missing the '$1' binary in PATH"; }
+need kubectl
+
+_TRASH=()
+_cleanup() { [ "${#_TRASH[@]}" -gt 0 ] && rm -f "${_TRASH[@]}"; return 0; }
+trap _cleanup EXIT
+
+profile_map() {
+  if [ -f "$PROFILE_MAP" ]; then printf '%s' "$PROFILE_MAP"
+  elif [ -f "$LEGACY_PROFILE_MAP" ]; then printf '%s' "$LEGACY_PROFILE_MAP"
+  fi
+}
+
+# the right credential for the right cluster, independent of what is exported.
+# The link is the same one the web interface uses.
+apply_aws_profile() {
+  local map c p
+  map=$(profile_map); [ -n "$map" ] || return 0
+  command -v jq >/dev/null 2>&1 || return 0
+  c=$(kubectl config current-context 2>/dev/null) || return 0
+  p=$(jq -r --arg c "$c" '.[$c] // empty' "$map" 2>/dev/null)
+  if [ -n "$p" ]; then
+    export AWS_PROFILE="$p"
+    unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN
+  fi
+}
+
+cur_ctx() { kubectl config current-context 2>/dev/null; }
+cur_ns()  { kubectl config view --minify -o jsonpath='{..namespace}' 2>/dev/null || true; }
+ns_or_default() { local n; n=$(cur_ns); echo "${n:-default}"; }
+
+# the only gate of the tool: a human at an interactive terminal says yes.
+# Without a terminal (script, pipe, agent) the answer is always no.
+confirm() {
+  printf '%s%s%s\n' "$Y$B" "$1" "$Z" >&2
+  if [ ! -t 0 ]; then
+    printf '%s\n' "  refused: this needs a confirmation typed at an interactive terminal." >&2
+    exit 3
+  fi
+  printf '  cluster : %s\n  type yes to go on: ' "$(cur_ctx)" >&2
+  local ans; read -r ans
+  [ "$ans" = "yes" ] || { printf '  cancelled\n' >&2; exit 3; }
+}
+
+backup_kubeconfig() {
+  mkdir -p "$BACKUP_DIR"
+  local dst
+  dst="$BACKUP_DIR/config-$(date +%Y%m%d-%H%M%S)"
+  cp "$KUBECFG" "$dst" && printf '%s' "$dst"
+}
+
+pick() { # pick <prompt> ; reads candidates from stdin
+  if command -v fzf >/dev/null 2>&1 && [ -t 0 ]; then
+    fzf --height=40% --reverse --prompt="$1 > "
+  else
+    local arr=() i=1 line
+    while IFS= read -r line; do arr+=("$line"); done
+    for line in "${arr[@]}"; do printf '%3d) %s\n' "$i" "$line" >&2; i=$((i+1)); done
+    printf '%s: ' "$1" >&2; local n; read -r n </dev/tty
+    printf '%s' "${arr[$((n-1))]}"
+  fi
+}
+
+# =====================================================================
+# add - take in a new kubeconfig (the "they sent me the new config" case)
+# =====================================================================
+cmd_add() {
+  local src="" alias_name="" force=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --alias|-a) alias_name="$2"; shift 2 ;;
+      --force|-f) force=1; shift ;;
+      -) src="-"; shift ;;
+      *) src="$1"; shift ;;
+    esac
+  done
+  [ -n "$src" ] || die "usage: kd add <file.yaml|-> [--alias short] [--force]"
+
+  local tmp; tmp=$(mktemp); _TRASH+=("$tmp" "$tmp.merged")
+  if [ "$src" = "-" ]; then cat > "$tmp"; else
+    [ -r "$src" ] || die "cannot read '$src'"
+    cp "$src" "$tmp"
+  fi
+  chmod 600 "$tmp"
+
+  kubectl --kubeconfig="$tmp" config view >/dev/null 2>&1 \
+    || die "this is not a valid kubeconfig"
+
+  local incoming; incoming=$(kubectl --kubeconfig="$tmp" config get-contexts -o name)
+  [ -n "$incoming" ] || die "the file has no context"
+
+  local existing=""
+  [ -f "$KUBECFG" ] && existing=$(kubectl config get-contexts -o name 2>/dev/null)
+
+  hdr "contexts in the file"
+  local n
+  while IFS= read -r n; do
+    if grep -qxF "$n" <<<"$existing"; then
+      if [ "$force" = 1 ]; then
+        printf '  %s%s%s  (already exists, will be REPLACED)\n' "$Y" "$n" "$Z"
+        # removes the entry from the LOCAL kubeconfig only, the cluster is not touched
+        kubectl config delete-context "$n" >/dev/null 2>&1
+      else
+        local new="$n-2" i=2
+        while grep -qxF "$new" <<<"$existing"; do i=$((i+1)); new="$n-$i"; done
+        printf '  %s%s%s  (name clash, comes in as %s)\n' "$Y" "$n" "$Z" "$new"
+        kubectl --kubeconfig="$tmp" config rename-context "$n" "$new" >/dev/null
+      fi
+    else
+      printf '  %s%s%s\n' "$G" "$n" "$Z"
+    fi
+  done <<<"$incoming"
+
+  local bkp=""
+  if [ -f "$KUBECFG" ]; then
+    bkp=$(backup_kubeconfig)
+    KUBECONFIG="$KUBECFG:$tmp" kubectl config view --flatten > "$tmp.merged" \
+      || die "merge failed, your kubeconfig was NOT touched (backup in $bkp)"
+  else
+    mkdir -p "$(dirname "$KUBECFG")"
+    cp "$tmp" "$tmp.merged"
+  fi
+  install -m600 "$tmp.merged" "$KUBECFG"
+  [ -n "$bkp" ] && printf '%sbackup:%s %s\n' "$DIM" "$Z" "$bkp"
+  ok "kubeconfig updated: $KUBECFG"
+
+  # short alias: EKS/GKE names are huge, this fixes it
+  local last; last=$(kubectl --kubeconfig="$tmp" config get-contexts -o name | tail -1)
+  if [ -z "$alias_name" ] && [ ${#last} -gt 30 ] && [ -t 0 ]; then
+    local sug; sug=$(printf '%s' "$last" | sed 's|.*/||; s|.*:||' | tr -cd 'a-zA-Z0-9._-')
+    printf 'long name. short alias [%s] (enter accepts, "-" skips): ' "$sug"
+    local a; read -r a; a="${a:-$sug}"
+    [ "$a" != "-" ] && alias_name="$a"
+  fi
+  if [ -n "$alias_name" ]; then
+    cmd_alias "$last" "$alias_name"
+  fi
+
+  hdr "now"
+  cmd_ls
+  printf '\n%suse:%s kd use <name>   then   kd map\n' "$DIM" "$Z"
+}
+
+# short alias for an existing context (adds, never removes the original)
+cmd_alias() {
+  local orig="${1:-}" short="${2:-}"
+  [ -n "$orig" ] && [ -n "$short" ] || die "usage: kd alias <original-context> <alias>"
+  local cl us nsx
+  cl=$(kubectl config view -o jsonpath="{.contexts[?(@.name==\"$orig\")].context.cluster}")
+  us=$(kubectl config view -o jsonpath="{.contexts[?(@.name==\"$orig\")].context.user}")
+  nsx=$(kubectl config view -o jsonpath="{.contexts[?(@.name==\"$orig\")].context.namespace}")
+  [ -n "$cl" ] || die "context '$orig' does not exist"
+  kubectl config set-context "$short" --cluster="$cl" --user="$us" \
+    ${nsx:+--namespace="$nsx"} >/dev/null
+  ok "alias '$short' -> $orig"
+}
+
+# =====================================================================
+# navigation
+# =====================================================================
+cmd_ls() {
+  need jq
+  local current; current=$(cur_ctx)
+  printf '%-3s %-38s %-14s %s\n' "" "CONTEXT" "NAMESPACE" "CLUSTER"
+  kubectl config view -o json | jq -r '.contexts[] | [.name, (.context.namespace // "default"), .context.cluster] | @tsv' \
+  | while IFS=$'\t' read -r n ns cl; do
+      local mark=" " color=""
+      [ "$n" = "$current" ] && { mark="*"; color="$B$G"; }
+      printf '%s%-3s %-38s %-14s %s%s\n' "$color" "$mark" "${n:0:38}" "${ns:0:14}" "${cl:0:34}" "$Z"
+    done
+}
+
+cmd_use() {
+  local target="${1:-}"
+  [ -z "$target" ] && target=$(kubectl config get-contexts -o name | pick "cluster")
+  [ -n "$target" ] || exit 0
+  kubectl config use-context "$target" >/dev/null || die "context '$target' does not exist"
+  apply_aws_profile
+  ok "cluster: $target   namespace: $(ns_or_default)"
+  cmd_doctor --quiet
+}
+
+cmd_ns() {
+  local target="${1:-}"
+  [ -z "$target" ] && target=$(kubectl get ns -o name 2>/dev/null | sed 's|namespace/||' | pick "namespace")
+  [ -n "$target" ] || exit 0
+  kubectl config set-context --current --namespace="$target" >/dev/null
+  ok "namespace: $target"
+}
+
+# =====================================================================
+# map - the overview of the cluster right after connecting
+# =====================================================================
+cmd_map() {
+  need jq
+  local ctx; ctx=$(cur_ctx) || die "no active context"
+  printf '%s%s%s   current ns: %s\n' "$B$C" "$ctx" "$Z" "$(ns_or_default)"
+
+  local ver; ver=$(kubectl version -o json 2>/dev/null | jq -r '.serverVersion.gitVersion // "?"')
+  printf '%sserver:%s %s\n' "$DIM" "$Z" "$ver"
+
+  hdr "NODES"
+  kubectl get nodes -o json 2>/dev/null | jq -r '
+    .items[] |
+    [ .metadata.name,
+      ( [ .status.conditions[] | select(.type=="Ready") | .status ] | .[0] // "?" ),
+      ( .status.nodeInfo.kubeletVersion ),
+      ( .status.capacity.cpu + " cpu / " + .status.capacity.memory ),
+      ( if .spec.unschedulable then "CORDONED" else "" end)
+    ] | @tsv' | column -t -s$'\t'
+
+  hdr "NAMESPACES AND LOAD"
+  kubectl get pods -A -o json 2>/dev/null | jq -r '
+    [ .items[] | { ns: .metadata.namespace,
+                   phase: .status.phase,
+                   ready: ( [ .status.containerStatuses[]? | select(.ready) ] | length ),
+                   total: ( .spec.containers | length ),
+                   rst: ( [ .status.containerStatuses[]?.restartCount ] | add // 0 ) } ]
+    | group_by(.ns)
+    | map({ ns: .[0].ns,
+            pods: length,
+            ok: ( [ .[] | select(.phase == "Succeeded" or (.ready == .total and .phase == "Running")) ] | length ),
+            restarts: ( [ .[] | .rst ] | add ) })
+    | .[] | [ .ns, (.pods|tostring), ((.pods - .ok)|tostring), (.restarts|tostring) ] | @tsv' \
+  | { printf 'NAMESPACE\tPODS\tWITH_PROBLEMS\tRESTARTS\n'; cat; } | column -t -s$'\t'
+
+  hdr "WORKLOADS"
+  kubectl get deploy,sts,ds,cronjob -A --no-headers 2>/dev/null \
+    | awk '{print $1"\t"$2"\t"$3}' \
+    | { printf 'NAMESPACE\tRESOURCE\tREADY\n'; cat; } | column -t -s$'\t' | head -40
+
+  hdr "ENTRY POINTS (non-ClusterIP services and ingresses)"
+  { kubectl get svc -A --field-selector spec.type!=ClusterIP --no-headers 2>/dev/null | awk '{print $1"\tsvc/"$2"\t"$5"\t"$6}'
+    kubectl get ingress -A --no-headers 2>/dev/null | awk '{print $1"\ting/"$2"\t"$4"\t"$5}'
+  } | { printf 'NAMESPACE\tRESOURCE\tADDRESS\tPORTS\n'; cat; } | column -t -s$'\t'
+
+  local prob
+  prob=$(kubectl get pods -A -o json 2>/dev/null | jq -r '
+    .items[] | select(.status.phase != "Succeeded") | select(
+      (.status.phase=="Failed") or (.status.phase=="Pending") or
+      ([.status.containerStatuses[]? | select(.ready|not)] | length > 0)
+    ) | [ .metadata.namespace, .metadata.name, .status.phase,
+          ( [ .status.containerStatuses[]? | .state | keys[0] ] | join(",") ),
+          ( [ .status.containerStatuses[]?.restartCount ] | add // 0 | tostring )
+        ] | @tsv')
+  hdr "PROBLEMS"
+  if [ -n "$prob" ]; then
+    printf '%s' "$prob" | { printf 'NAMESPACE\tPOD\tPHASE\tSTATE\tRESTARTS\n'; cat; } \
+      | column -t -s$'\t' | sed "s/^/$R/;s/$/$Z/"
+  else
+    printf '%sno pod down%s\n' "$G" "$Z"
+  fi
+
+  hdr "WARNING EVENTS (10 most recent)"
+  kubectl get events -A --field-selector type=Warning \
+    --sort-by=.lastTimestamp --no-headers 2>/dev/null | tail -10 \
+    | awk '{ns=$1; obj=$5; $1=$2=$3=$4=$5=""; sub(/^ +/,""); print ns"\t"obj"\t"$0}' \
+    | column -t -s$'\t' | cut -c1-160
+  printf '\n'
+}
+
+# =====================================================================
+# pods and details
+# =====================================================================
+# one line per pod, problems first: NAMESPACE POD READY STATE RST NODE IP
+pod_rows() { # pod_rows <regex> <kubectl get pods args...>
+  local filter="$1"; shift
+  kubectl get pods "$@" -o json 2>/dev/null | jq -r --arg f "$filter" '
+    .items[]
+    | select($f == "" or (.metadata.name | test($f)))
+    | .status.phase as $phase
+    | { ns: .metadata.namespace, name: .metadata.name,
+        ready: ( ([.status.containerStatuses[]? | select(.ready)]|length|tostring) + "/" + (.spec.containers|length|tostring) ),
+        state: ( if (.metadata.deletionTimestamp) then "Terminating"
+                 else ( [ .status.containerStatuses[]? | select(.ready|not) | .state | to_entries[0].value.reason // empty ] | .[0] // $phase ) end ),
+        rst: ( [ .status.containerStatuses[]?.restartCount ] | add // 0 ),
+        node: ( .spec.nodeName // "-" ), ip: ( .status.podIP // "-" ) }
+    | [ (if (.state == "Running" or .state == "Succeeded") then "1" else "0" end), .ns, .name, .ready, .state, (.rst|tostring), .node, .ip ]
+    | @tsv' | sort
+}
+
+cmd_pods() {
+  need jq
+  local args=(-A)
+  case "${1:-}" in
+    -n) args=(-n "$2"); shift 2 ;;
+    -A|--all) shift ;;
+    .)  args=(-n "$(ns_or_default)"); shift ;;
+  esac
+  pod_rows "${1:-}" "${args[@]}" | cut -f2- \
+  | { printf 'NAMESPACE\tPOD\tREADY\tSTATE\tRST\tNODE\tIP\n'; cat; } \
+  | column -t -s$'\t'
+}
+
+resolve_pod() { # takes a partial name; prints "ns name"
+  local q="${1:-}" res
+  res=$(kubectl get pods -A -o json | jq -r --arg q "$q" \
+      '.items[] | select(.metadata.name | test($q)) | .metadata.namespace + " " + .metadata.name')
+  local n; n=$(printf '%s' "$res" | grep -c . )
+  [ "$n" -eq 0 ] && die "no pod matches '$q'"
+  if [ "$n" -gt 1 ]; then res=$(printf '%s\n' "$res" | pick "pod"); fi
+  printf '%s' "$res"
+}
+
+cmd_info() {
+  need jq
+  local ns name found; found=$(resolve_pod "${1:-}") || exit 1; read -r ns name <<<"$found"
+  kubectl get pod "$name" -n "$ns" -o json | jq -r '
+    "namespace : " + .metadata.namespace,
+    "pod       : " + .metadata.name,
+    "node      : " + (.spec.nodeName // "-"),
+    "ip        : " + (.status.podIP // "-"),
+    "phase     : " + .status.phase,
+    "created   : " + .metadata.creationTimestamp,
+    "owner     : " + ((.metadata.ownerReferences[0] | .kind + "/" + .name) // "-"),
+    "sa        : " + (.spec.serviceAccountName // "default"),
+    "",
+    "containers:",
+    ( .spec.containers[] | "  - " + .name
+        + "\n    image    : " + .image
+        + "\n    ports    : " + ( [ .ports[]?.containerPort | tostring ] | join(",") // "-" )
+        + "\n    requests : " + ( .resources.requests // {} | tostring )
+        + "\n    limits   : " + ( .resources.limits // {} | tostring ) ),
+    "",
+    "container state:",
+    ( .status.containerStatuses[]? | "  - " + .name + "  ready=" + (.ready|tostring)
+        + "  restarts=" + (.restartCount|tostring)
+        + "  state=" + (.state | to_entries[0].key)
+        + ( .state | to_entries[0].value.reason // "" | if . == "" then "" else " (" + . + ")" end ) ),
+    "",
+    "volumes:",
+    ( .spec.volumes[]? | "  - " + .name + " (" + ( del(.name) | keys[0] ) + ")" )'
+  hdr "pod events"
+  kubectl events -n "$ns" --for "pod/$name" 2>/dev/null | tail -12 || true
+}
+
+cmd_log() {
+  need jq
+  local q="${1:-}"; shift || true
+  # several pods match (replicas of a deployment): follow them all together
+  local n; n=$(kubectl get pods -A -o json | jq -r --arg q "$q" \
+      '[.items[] | select(.metadata.name | test($q))] | length')
+  if [ "${n:-0}" -gt 1 ] && command -v stern >/dev/null 2>&1; then
+    printf '%s>> %s pods match "%s", following them all (stern)%s\n' "$DIM" "$n" "$q" "$Z" >&2
+    exec stern --all-namespaces --tail=50 "$q"
+  fi
+  local ns name found; found=$(resolve_pod "$q") || exit 1; read -r ns name <<<"$found"
+  printf '%s>> logs of %s/%s (ctrl-c quits)%s\n' "$DIM" "$ns" "$name" "$Z" >&2
+  kubectl logs -n "$ns" "$name" --all-containers --prefix --tail=200 -f "$@"
+}
+
+cmd_prev() {
+  need jq
+  local ns name found; found=$(resolve_pod "${1:-}") || exit 1; read -r ns name <<<"$found"
+  kubectl logs -n "$ns" "$name" --all-containers --previous --tail=500 \
+    || warn "this container has no previous run"
+}
+
+cmd_sh() {
+  need jq
+  local ns name found; found=$(resolve_pod "${1:-}") || exit 1; read -r ns name <<<"$found"
+  confirm "open a shell in $ns/$name? It runs a process inside the cluster."
+  printf '%s>> shell in %s/%s%s\n' "$DIM" "$ns" "$name" "$Z" >&2
+  kubectl exec -i -t -n "$ns" "$name" -- sh -c 'command -v bash >/dev/null && exec bash || exec sh' \
+    || warn "no shell in the container (distroless image?)"
+}
+
+cmd_fw() {
+  need jq
+  local q="${1:-}" ports="${2:-}"
+  [ -n "$ports" ] || die "usage: kd fw <pod-or-part-of-the-name> <local:remote|port>"
+  local ns name found; found=$(resolve_pod "$q") || exit 1; read -r ns name <<<"$found"
+  printf '%s>> http://localhost:%s  (ctrl-c stops)%s\n' "$DIM" "${ports%%:*}" "$Z" >&2
+  kubectl port-forward -n "$ns" "pod/$name" "$ports" --address 127.0.0.1
+}
+
+cmd_top() {
+  hdr "NODES"
+  kubectl top nodes 2>/dev/null || warn "metrics-server is not installed on this cluster"
+  hdr "PODS (top 20 by cpu)"
+  kubectl top pod -A --sort-by=cpu 2>/dev/null | head -21
+}
+
+cmd_yaml() {
+  need jq
+  local ns name found; found=$(resolve_pod "${1:-}") || exit 1; read -r ns name <<<"$found"
+  kubectl get pod "$name" -n "$ns" -o yaml
+}
+
+# =====================================================================
+# utilities
+# =====================================================================
+cmd_doctor() {
+  local quiet=0; [ "${1:-}" = "--quiet" ] && quiet=1
+  local ctx; ctx=$(cur_ctx) || die "no active context (kd add <config>)"
+  local out rc
+  out=$(kubectl --request-timeout=12s version -o json 2>&1); rc=$?
+  if [ $rc -eq 0 ]; then
+    [ $quiet -eq 1 ] || ok "connected to $ctx"
+    [ $quiet -eq 1 ] || printf '   server %s | you: %s\n' \
+      "$(printf '%s' "$out" | jq -r '.serverVersion.gitVersion' 2>/dev/null)" \
+      "$(kubectl auth whoami -o jsonpath='{.status.userInfo.username}' 2>/dev/null || echo '?')"
+    return 0
+  fi
+  printf '%sfailed to talk to %s%s\n' "$R" "$ctx" "$Z" >&2
+  case "$out" in
+    *"Token has expired"*|*sso*|*SSO*)
+      printf '  cause: the SSO session expired\n  fix: kd aws login%s\n' "${AWS_PROFILE:+ $AWS_PROFILE}" >&2 ;;
+    *NoCredentials*|*ExpiredToken*|*credentials*)
+      if [ -z "${AWS_PROFILE:-}" ]; then
+        printf '  cause: no AWS profile linked to this cluster\n  fix: kd aws link %s <profile>   (list the profiles with: kd aws)\n' "$ctx" >&2
+      else
+        printf '  cause: profile %s has no valid credential\n  fix: kd aws login %s\n' "$AWS_PROFILE" "$AWS_PROFILE" >&2
+      fi ;;
+    *"no such host"*|*"i/o timeout"*|*"connection refused"*) printf '  likely cause: network/VPN. The apiserver does not answer from here\n' >&2 ;;
+    *Unauthorized*|*forbidden*) printf '  likely cause: your user has no RBAC on this cluster\n' >&2 ;;
+  esac
+  printf '%s%s%s\n' "$DIM" \
+    "$(printf '%s' "$out" | grep -aiE 'error|unable|denied|refused|timeout' | tail -2)" "$Z" >&2
+  return 1
+}
+
+cmd_ui() {
+  command -v k9s >/dev/null || die "k9s is not installed (run the Kube Deck install.sh)"
+  # --readonly: k9s also turns off delete, edit and scale
+  exec k9s --readonly --context "$(cur_ctx)"
+}
+
+# AWS credentials per cluster
+cmd_aws() {
+  need jq
+  local sub="${1:-ls}"; shift || true
+  mkdir -p "$CFG_DIR"
+  if [ ! -f "$PROFILE_MAP" ]; then
+    if [ -f "$LEGACY_PROFILE_MAP" ]; then cp "$LEGACY_PROFILE_MAP" "$PROFILE_MAP"
+    else echo '{}' > "$PROFILE_MAP"; fi
+    chmod 600 "$PROFILE_MAP"
+  fi
+  case "$sub" in
+    ls|"")
+      hdr "cluster -> aws profile"
+      kubectl config get-contexts -o name | while read -r c; do
+        local p; p=$(jq -r --arg c "$c" '.[$c] // "(uses the one of the shell)"' "$PROFILE_MAP")
+        printf '  %-52s %s\n' "${c:0:52}" "$p"
+      done
+      hdr "profiles in ~/.aws/config"
+      grep -E '^\[profile |^\[default\]' ~/.aws/config 2>/dev/null | sed 's/\[profile /  /; s/\[default\]/  default/; s/\]//'
+      printf '\n%slink:%s  kd aws link <context> <profile>\n' "$DIM" "$Z"
+      printf '%slogin:%s kd aws login <profile>\n' "$DIM" "$Z"
+      ;;
+    link)
+      local c="${1:-}" p="${2:-}"
+      [ -n "$c" ] && [ -n "$p" ] || die "usage: kd aws link <context> <profile>"
+      kubectl config get-contexts -o name | grep -qxF "$c" || die "context '$c' does not exist"
+      local cluster targets tmp
+      cluster=$(kubectl config view -o jsonpath="{.contexts[?(@.name==\"$c\")].context.cluster}")
+      targets=$(kubectl config view -o json | jq -r --arg cl "$cluster" \
+        '.contexts[] | select(.context.cluster==$cl) | .name')
+      tmp=$(mktemp); _TRASH+=("$tmp")
+      jq --arg p "$p" --argjson targets "$(printf '%s' "$targets" | jq -R . | jq -s .)" \
+         'reduce $targets[] as $c (.; .[$c] = $p)' "$PROFILE_MAP" > "$tmp" && mv "$tmp" "$PROFILE_MAP"
+      chmod 600 "$PROFILE_MAP"
+      ok "profile '$p' linked to: $(printf '%s' "$targets" | tr '\n' ' ')"
+      ;;
+    unlink)
+      local c="${1:-}"; [ -n "$c" ] || die "usage: kd aws unlink <context>"
+      local tmp; tmp=$(mktemp); _TRASH+=("$tmp")
+      jq --arg c "$c" 'del(.[$c])' "$PROFILE_MAP" > "$tmp" && mv "$tmp" "$PROFILE_MAP"
+      chmod 600 "$PROFILE_MAP"
+      ok "link removed from $c"
+      ;;
+    login)
+      local p="${1:-$(jq -r --arg c "$(cur_ctx)" '.[$c] // empty' "$PROFILE_MAP")}"
+      [ -n "$p" ] || die "usage: kd aws login <profile>  (or link a profile to the current cluster)"
+      command -v aws >/dev/null || die "aws CLI not found"
+      printf '%s>> aws sso login --profile %s%s\n' "$DIM" "$p" "$Z"
+      env -u AWS_PROFILE -u AWS_ACCESS_KEY_ID -u AWS_SECRET_ACCESS_KEY -u AWS_SESSION_TOKEN \
+        aws sso login --profile "$p" && cmd_doctor
+      ;;
+    *) die "usage: kd aws [ls|link|unlink|login]" ;;
+  esac
+}
+
+# graphical interface in the browser
+cmd_web() {
+  local root
+  root="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
+  exec "$root/run.sh" "$@"
+}
+
+# =====================================================================
+# console - interactive mode: see pods and act on them without retyping
+# =====================================================================
+CONS_NS=(); CONS_NAME=(); CONS_STATE=()
+
+_cons_header() {
+  printf '%s%s%s  %sns:%s %s\n' "$B$C" "$(cur_ctx)" "$Z" "$DIM" "$Z" "$1"
+}
+
+# draws the table and fills the arrays. Returns 1 when it could not talk to the cluster.
+_cons_list() {
+  local filter="$1"; shift
+  CONS_NS=(); CONS_NAME=(); CONS_STATE=()
+  local probe rows
+  probe=$(kubectl get pods "$@" -o name 2>&1 >/dev/null) || {
+    printf '\n%s  could not read the pods of this cluster.%s\n' "$R" "$Z"
+    printf '%s  %s%s\n' "$DIM" "$(printf '%s' "$probe" | grep -aiE 'error|unable|denied|refused|expired|forbidden' | tail -1 | cut -c1-150)" "$Z"
+    printf '\n  %skd doctor%s gives the full diagnosis.\n' "$B" "$Z"
+    return 1
+  }
+  rows=$(pod_rows "$filter" "$@")
+  if [ -z "$rows" ]; then
+    printf '\n  %sno pod%s%s\n' "$DIM" "${filter:+ matches \"$filter\"}" "$Z"
+    return 0
+  fi
+
+  printf '\n%s%4s %-22s %-42s %-7s %-20s %4s%s\n' \
+    "$DIM" "#" "NAMESPACE" "POD" "READY" "STATE" "RST" "$Z"
+  local i=0 order ns name ready state rst _node _ip color
+  while IFS=$'\t' read -r order ns name ready state rst _node _ip; do
+    i=$((i+1))
+    CONS_NS+=("$ns"); CONS_NAME+=("$name"); CONS_STATE+=("$state")
+    color=""; [ "$order" = "0" ] && color="$R"
+    [ "$order" = "1" ] && [ "${rst:-0}" -gt 5 ] 2>/dev/null && color="$Y"
+    printf '%s%4d %-22s %-42s %-7s %-20s %4s%s\n' \
+      "$color" "$i" "${ns:0:22}" "${name:0:42}" "$ready" "${state:0:20}" "$rst" "$Z"
+  done <<<"$rows"
+  return 0
+}
+
+_cons_pod_menu() {
+  local idx="$1" ns name
+  ns="${CONS_NS[$idx]}"; name="${CONS_NAME[$idx]}"
+  while :; do
+    printf '\n%s%s/%s%s   %s\n' "$B$C" "$ns" "$name" "$Z" "${CONS_STATE[$idx]}"
+    printf '  %sl%s live log   %sp%s previous log   %si%s info   %sy%s yaml   %sd%s describe   %se%s events\n' \
+      "$B" "$Z" "$B" "$Z" "$B" "$Z" "$B" "$Z" "$B" "$Z" "$B" "$Z"
+    printf '  %sf%s port-forward   %ss%s shell (asks first)   %sb%s back\n' \
+      "$B" "$Z" "$B" "$Z" "$B" "$Z"
+    printf '%s> %s' "$C" "$Z"
+    local a; read -r a || return 0
+    case "$a" in
+      l) printf '%s>> ctrl-c goes back to the menu%s\n' "$DIM" "$Z"
+         ( trap 'exit 0' INT
+           kubectl logs -n "$ns" "$name" --all-containers --prefix --tail=200 -f ) ;;
+      p) kubectl logs -n "$ns" "$name" --all-containers --previous --tail=500 2>&1 \
+           | head -200 || warn "no previous run" ;;
+      i) ( cmd_info "^${name}$" ) ;;
+      y) kubectl get pod "$name" -n "$ns" -o yaml | ${PAGER:-less -R} ;;
+      d) kubectl describe pod "$name" -n "$ns" | ${PAGER:-less -R} ;;
+      e) kubectl events -n "$ns" --for "pod/$name" 2>/dev/null | tail -25 ;;
+      f) printf 'ports (local:remote, e.g. 8080:80): '
+         local pt; read -r pt
+         [ -n "$pt" ] && ( trap 'exit 0' INT
+           printf '%s>> http://localhost:%s  (ctrl-c goes back)%s\n' "$DIM" "${pt%%:*}" "$Z"
+           kubectl port-forward -n "$ns" "pod/$name" "$pt" --address 127.0.0.1 ) ;;
+      # subshell: a refused confirmation (exit 3) ends the action, not the console
+      s) ( cmd_sh "^${name}$" ) ;;
+      b|"") return 0 ;;
+      q) exit 0 ;;
+      *) warn "unknown option: $a" ;;
+    esac
+  done
+}
+
+cmd_console() {
+  need jq
+  local filter="${1:-}" scope=(-A) auto=0 ns
+  while :; do
+    ns=$(ns_or_default)
+    printf '\033[H\033[2J'
+    _cons_header "$ns"
+    [ "${#scope[@]}" = 1 ] && printf '%s  scope: all namespaces%s\n' "$DIM" "$Z"
+    [ -n "$filter" ] && printf '%s  filter: %s%s\n' "$DIM" "$filter" "$Z"
+
+    _cons_list "$filter" "${scope[@]}"
+
+    printf '\n%s  number%s opens the pod   %sr%s reload   %sa%s auto(%s)   %s/%s filter   %sn%s namespace   %sc%s cluster\n' \
+      "$B" "$Z" "$B" "$Z" "$B" "$Z" "$([ "$auto" = 1 ] && echo "on, 5s" || echo off)" \
+      "$B" "$Z" "$B" "$Z" "$B" "$Z"
+    printf '  %st%s top   %sm%s map   %se%s events   %sq%s quit\n' \
+      "$B" "$Z" "$B" "$Z" "$B" "$Z" "$B" "$Z"
+    printf '%s> %s' "$C" "$Z"
+
+    local a
+    if [ "$auto" = 1 ]; then
+      # real time: redraws by itself every 5 s, any key takes control
+      read -r -t 5 a || { printf '\n'; continue; }
+    else
+      read -r a || break
+    fi
+
+    case "$a" in
+      ''|r) : ;;
+      a) auto=$((1-auto)) ;;
+      q) break ;;
+      /) printf 'filter (regex, empty clears): '; read -r filter ;;
+      n) printf 'namespace ("." = all): '; local x; read -r x
+         if [ "$x" = "." ]; then scope=(-A)
+         elif [ -n "$x" ]; then cmd_ns "$x" >/dev/null 2>&1; scope=(-n "$x"); fi ;;
+      c) cmd_use; printf '%senter to go on%s' "$DIM" "$Z"; read -r _ ;;
+      t) cmd_top; printf '\n%senter to go on%s' "$DIM" "$Z"; read -r _ ;;
+      m) cmd_map | ${PAGER:-less -R} ;;
+      e) kubectl get events "${scope[@]}" --field-selector type=Warning \
+           --sort-by=.lastTimestamp 2>/dev/null | tail -30 | ${PAGER:-less -R} ;;
+      *[!0-9]*) warn "unknown option: $a"; sleep 1 ;;
+      *) local i=$((a-1))
+         if [ "$i" -ge 0 ] && [ "$i" -lt "${#CONS_NAME[@]}" ]; then
+           _cons_pod_menu "$i"
+         else
+           warn "there is no item $a"; sleep 1
+         fi ;;
+    esac
+  done
+  printf '\n'
+}
+
+cmd_help() {
+cat <<EOF
+${B}kd${Z} ${DIM}v$VERSION - Kube Deck, a light and safe Kubernetes client${Z}
+
+${B}connect${Z}
+  kd add <file.yaml> [--alias dev]     takes in a new kubeconfig (backup + name clash handling)
+  kd add - --alias dev                 the same, reading stdin (cat/paste)
+  kd alias <long-context> <short>      short alias for a huge ARN context
+  kd ls                                lists the clusters, marks the current one
+  kd use [name]                        switches cluster (no argument opens the picker)
+  kd ns  [name]                        switches namespace
+  kd doctor                            says why the connection failed
+  kd aws                               shows which AWS profile each cluster uses
+  kd aws link <ctx> <profile>          binds the credential to the cluster
+  kd aws login [profile]               aws sso login of the current cluster profile
+
+${B}interactive mode${Z}
+  kd console [regex]                   live panel: pick the pod by number and act on it
+
+${B}see${Z}
+  kd map                               full map (nodes, ns, workloads, ports, problems)
+  kd pods [-n ns|.] [regex]            every pod, problems first
+  kd info <pod>                        basic pod data + events
+  kd yaml <pod>                        full manifest
+  kd log  <pod>                        follows the log
+  kd prev <pod>                        log of the container that died
+  kd top                               cpu/memory usage
+  kd fw <pod> <8080:80>                port-forward (a local tunnel, changes nothing)
+  kd ui                                opens k9s in read-only mode
+  kd web [port]                        graphical interface in the browser
+
+${B}look inside${Z} ${DIM}(asks for a typed confirmation, never runs without a terminal)${Z}
+  kd sh <pod>                          shell inside the pod
+
+${DIM}<pod> takes part of the name and finds it in any namespace.
+
+No delete, scale, restart, apply, edit or patch: not behind a flag, not behind a
+confirmation. For that, use kubectl directly, on purpose.${Z}
+EOF
+}
+
+# =====================================================================
+main() {
+  apply_aws_profile
+  local c="${1:-help}"; shift || true
+  case "$c" in
+    add) cmd_add "$@" ;;
+    alias) cmd_alias "$@" ;;
+    ls|clusters) cmd_ls "$@" ;;
+    use|ctx|cluster) cmd_use "$@" ;;
+    ns|namespace) cmd_ns "$@" ;;
+    console|c) cmd_console "$@" ;;
+    map|overview) cmd_map "$@" ;;
+    pods|po) cmd_pods "$@" ;;
+    info|desc|describe) cmd_info "$@" ;;
+    yaml|y) cmd_yaml "$@" ;;
+    log|logs|l) cmd_log "$@" ;;
+    prev|previous) cmd_prev "$@" ;;
+    sh|exec|shell) cmd_sh "$@" ;;
+    fw|forward|pf) cmd_fw "$@" ;;
+    top) cmd_top "$@" ;;
+    doctor|dr) cmd_doctor "$@" ;;
+    ui|k9s) cmd_ui "$@" ;;
+    web|gui) cmd_web "$@" ;;
+    aws|cred) cmd_aws "$@" ;;
+    restart|scale|kill|del|delete|rm|apply|edit|patch|drain|cordon)
+      die "'$c' does not exist in Kube Deck: it never changes or deletes anything in a cluster" ;;
+    version|-v|--version) printf 'kd %s\n' "$VERSION" ;;
+    help|-h|--help) cmd_help ;;
+    *) die "unknown command: $c   (kd help)" ;;
+  esac
+}
+main "$@"

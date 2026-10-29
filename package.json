@@ -1,0 +1,11 @@
+{
+  "name": "devkit-kube-deck-e2e",
+  "private": true,
+  "type": "commonjs",
+  "scripts": {
+    "test:e2e": "playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.62.0"
+  }
+}

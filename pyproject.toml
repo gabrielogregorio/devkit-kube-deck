@@ -1,0 +1,48 @@
+[project]
+name = "devkit-kube-deck"
+version = "2.0.0"
+description = "A light Kubernetes client that is safe by design: kd CLI and a web interface over kubectl that read freely, ask before opening a pod shell and never delete anything"
+requires-python = "==3.12.*"
+dependencies = []
+
+[dependency-groups]
+dev = [
+    "pytest==9.0.3",
+    "pytest-cov==7.1.0",
+    "ruff==0.16.4",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.coverage.run]
+source = ["server"]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
+fail_under = 100
+exclude_lines = [
+    "pragma: no cover",
+    "if __name__ == .__main__.:",
+]
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+extend-exclude = ["node_modules", "ui/dist"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "B", "I", "UP"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["kube_deck", "conftest", "fixtures", "tray_icon"]
+
+[tool.uv]
+# "Virtual" project: not an installable package, only scripts (server/, bin/kd, run.sh).
+# uv manages the dev tools only; the app itself runs on the system python3 with no packages.
+# Never re-resolve implicitly; bump deps explicitly with:
+#   uv lock --upgrade-package <pkg>==<new-ver>
+package = false
+upgrade = false

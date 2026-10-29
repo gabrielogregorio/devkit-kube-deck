@@ -1,0 +1,16 @@
+# Kube Deck - k9s resource aliases (type ":" + alias)
+aliases:
+  pp: v1/pods
+  dp: apps/v1/deployments
+  st: apps/v1/statefulsets
+  ds: apps/v1/daemonsets
+  sec: v1/secrets
+  cm: v1/configmaps
+  sv: v1/services
+  ing: networking.k8s.io/v1/ingresses
+  no: v1/nodes
+  ev: v1/events
+  cj: batch/v1/cronjobs
+  jo: batch/v1/jobs
+  pvc: v1/persistentvolumeclaims
+  sa: v1/serviceaccounts

@@ -1,0 +1,22 @@
+name: Feature request
+description: A new screen, column or command that reads the cluster, or a better way to connect
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What you are trying to see or do and what gets in the way today
+    validations:
+      required: true
+  - type: textarea
+    id: solution
+    attributes:
+      label: The solution you would like
+      description: Kube Deck never writes to a cluster; ideas that delete, scale or restart are out of scope.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered

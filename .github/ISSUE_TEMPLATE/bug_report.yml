@@ -1,0 +1,53 @@
+name: Bug report
+description: A screen comes back empty, a cluster does not connect, the shell does not open or kd prints an error
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: Include the error and the hint shown on the screen, or what `kd doctor` prints.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. `kd use <context>`
+        2. `kd web` and open Pods
+        3. ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Output of `kd version`
+      placeholder: 2.0.0
+    validations:
+      required: true
+  - type: input
+    id: cluster
+    attributes:
+      label: Cluster
+      description: Kind and Kubernetes version (no names, accounts or addresses)
+      placeholder: EKS 1.30 / k3d 1.31 / minikube
+    validations:
+      required: true
+  - type: textarea
+    id: commands
+    attributes:
+      label: Commands behind the screen
+      description: The "commands behind this screen" panel of the web UI, with names and accounts removed
+      render: text
+  - type: textarea
+    id: extra
+    attributes:
+      label: Anything else
