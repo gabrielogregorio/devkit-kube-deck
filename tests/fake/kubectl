@@ -1,0 +1,107 @@
+#!/usr/bin/env python3
+"""Fake kubectl for the tests: answers from JSON fixtures and never talks to a cluster.
+
+FAKE_K8S_DIR   folder with kubeconfig.json and <kind>.json fixtures
+FAKE_K8S_LOG   every call is appended here, one JSON list per line
+FAKE_FORBID    comma-separated kinds that answer 403
+FAKE_FAIL      text printed to stderr with exit 1 for every cluster call (network/credential)
+"""
+import json
+import os
+import sys
+from pathlib import Path
+
+argv = sys.argv[1:]
+log = os.environ.get("FAKE_K8S_LOG")
+if log:
+    with open(log, "a") as f:
+        f.write(json.dumps(argv) + "\n")
+
+DATA = Path(os.environ.get("FAKE_K8S_DIR", "."))
+args, ctx, i = [], None, 0
+while i < len(argv):
+    a = argv[i]
+    if a in ("--context", "--request-timeout", "--kubeconfig"):
+        if a == "--context":
+            ctx = argv[i + 1]
+        i += 2
+        continue
+    if a.startswith("--request-timeout="):
+        i += 1
+        continue
+    args.append(a)
+    i += 1
+
+
+def fixture(name, default=None):
+    p = DATA / f"{name}.json"
+    return json.loads(p.read_text()) if p.exists() else default
+
+
+def out(obj):
+    print(obj if isinstance(obj, str) else json.dumps(obj))
+    sys.exit(0)
+
+
+def fail(msg, code=1):
+    print(msg, file=sys.stderr)
+    sys.exit(code)
+
+
+cfg = fixture("kubeconfig", {"contexts": [], "clusters": [], "users": [], "current-context": ""})
+if not args:
+    fail("fake kubectl: no args")
+if args[0] == "config":
+    sub = args[1] if len(args) > 1 else ""
+    if sub == "current-context":
+        out(cfg.get("current-context", ""))
+    if sub == "view":
+        if "--minify" in args:
+            out("default")
+        out(cfg)
+    if sub == "get-contexts":
+        out("\n".join(c["name"] for c in cfg["contexts"]))
+    fail(f"fake kubectl: config {sub} not supported")
+
+if os.environ.get("FAKE_FAIL"):
+    fail(os.environ["FAKE_FAIL"])
+
+verb = args[0]
+if verb == "version":
+    out({"serverVersion": {"gitVersion": "v1.30.0"}})
+if verb == "get":
+    kinds = args[1].split(",")
+    for k in kinds:
+        if k in (os.environ.get("FAKE_FORBID") or "").split(","):
+            fail(f'Error from server (Forbidden): {k} is forbidden: User "u" cannot list resource "{k}"')
+    if len(args) > 2 and not args[2].startswith("-") and kinds[0] in ("pod", "deployment", "service"):
+        obj = next((x for x in fixture(kinds[0] + "s", {"items": []})["items"]
+                    if x["metadata"]["name"] == args[2]), None)
+        if obj is None:
+            fail(f'Error from server (NotFound): {kinds[0]}s "{args[2]}" not found')
+        out(obj)
+    items = []
+    for k in kinds:
+        items += fixture(k, {"items": []})["items"]
+    out({"items": items})
+if verb == "top":
+    if args[1] == "nodes":
+        out("node-a 250m 12% 1024Mi 30%")
+    out("default api-1 5m 64Mi\nkube-system dns-1 2m 20Mi")
+if verb == "auth":
+    if args[1] == "whoami":
+        out({"status": {"userInfo": {"username": "tester", "groups": ["devs"]}}})
+    out("yes" if args[2] in ("list", "get") else "no")
+if verb == "events":
+    out("LAST SEEN   TYPE      REASON    OBJECT      MESSAGE\n1m          Warning   BackOff   pod/api-2   Back-off")
+if verb == "describe":
+    out(f"Name: {args[2]}\nKind: {args[1]}")
+if verb == "logs":
+    print("line one")
+    print("line two")
+    sys.exit(0)
+if verb == "exec":
+    sys.stdin.readline()          # waits for the first keystrokes, like a real shell
+    print("fake shell")
+    sys.exit(0)
+fail(f"fake kubectl: {verb} not supported")

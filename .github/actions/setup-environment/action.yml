@@ -1,0 +1,39 @@
+name: 'Setup Environment'
+description: 'Creates the Python venv from the locked requirements, installs the locked Node packages of the UI and of the E2E and, optionally, builds the UI and installs Playwright'
+inputs:
+  e2e:
+    description: 'Also build the UI and install the locked Playwright + Chromium'
+    default: 'false'
+runs:
+  using: 'composite'
+  steps:
+    - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+      with:
+        node-version: '22'
+        cache: 'npm'
+        cache-dependency-path: |
+          package-lock.json
+          ui/package-lock.json
+
+    - name: Python venv (system python3, locked versions)
+      shell: bash
+      run: |
+        python3 -m venv .venv
+        .venv/bin/pip install --quiet --upgrade pip
+        .venv/bin/pip install --quiet -r requirements-dev.txt
+        .venv/bin/python --version
+        node --version
+        jq --version
+
+    - name: Node packages (versions from the package-lock.json files)
+      shell: bash
+      run: |
+        npm ci --silent
+        npm --prefix ui ci --silent
+
+    - name: Build the UI and install Playwright
+      if: ${{ inputs.e2e == 'true' }}
+      shell: bash
+      run: |
+        npm --prefix ui run build
+        npx playwright install --with-deps chromium-headless-shell

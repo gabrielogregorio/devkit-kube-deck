@@ -1,0 +1,36 @@
+# dependencies and builds (rebuild with: cd ui && npm ci && npm run build)
+node_modules/
+ui/dist/
+.venv/
+__pycache__/
+*.pyc
+.coverage
+.ruff_cache/
+.pytest_cache/
+test-results/
+playwright-report/
+trash/
+
+# no local user state belongs here. Kube Deck keeps everything outside the repo on purpose:
+#   ~/.kube/config                            kubeconfig
+#   ~/.kube/kube-deck-backups/                kubeconfig backups
+#   ~/.aws/credentials                        keys
+#   ~/.config/devkit-kube-deck/profiles.json  cluster -> AWS profile link
+#   ~/.cache/devkit-kube-deck/                log and icons of the top bar icon
+# the lines below are belt and braces, in case someone copies one of those into the project.
+*.kubeconfig
+kubeconfig*
+credentials
+*.pem
+*.key
+.env
+.env.*
+profiles.json
+perfis.json
+
+# editor and system junk
+.DS_Store
+*.swp
+*~
+.idea/
+.vscode/
