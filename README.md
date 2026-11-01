@@ -149,7 +149,7 @@ profile, and every layer runs on a fake `HOME`.
 | Workflow | When | What |
 |---|---|---|
 | `tests.yml` | push and PR to `main` | unit layers, then the E2E with Chromium |
-| `check-quality.yml` | push and PR to `main` | ruff, shellcheck, scripts executable, actions pinned by hash, YAML valid |
+| `check-quality.yml` | push and PR to `main` | ruff, shellcheck, scripts executable, actions pinned by hash, YAML valid; on PRs only, dependency audit with pip-audit and npm audit |
 | `codeql-analysis.yml` | push, PR and weekly | CodeQL for Python, JavaScript and the workflows |
 | `auto-complete-fields.yml` | PR to `main` | on a `release/x.x.x` branch `VERSION` must be a new tag; assigns, labels and fills the changelog |
 | `create-tag-and-release.yml` | PR merged into `main` | tag `vX.Y.Z` + release with the source tarball and `SHA256SUMS` |
