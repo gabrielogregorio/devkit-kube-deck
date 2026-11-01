@@ -8,7 +8,7 @@
 
 ## Checklist
 
-- [ ] `VERSION` bumped (merging into `main` creates the tag `vX.Y.Z` and the release)
+- [ ] On a `release/x.x.x` branch, `VERSION` bumped (merging into `main` creates the tag `vX.Y.Z` and the release)
 - [ ] `./run-tests.sh` ends with `ALL GREEN` (`RUN_E2E=1` when the UI or the server changed)
 - [ ] Server coverage still at 100% and the new code has tests in the same PR
 - [ ] Still safe by design: no kubectl verb that writes, no route or command that deletes, scales or restarts, and the pod shell still asks first

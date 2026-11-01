@@ -151,15 +151,16 @@ profile, and every layer runs on a fake `HOME`.
 | `tests.yml` | push and PR to `main` | unit layers, then the E2E with Chromium |
 | `check-quality.yml` | push and PR to `main` | ruff, shellcheck, scripts executable, actions pinned by hash, YAML valid |
 | `codeql-analysis.yml` | push, PR and weekly | CodeQL for Python, JavaScript and the workflows |
-| `auto-complete-fields.yml` | PR to `main` | `VERSION` must be a new tag; assigns, labels and fills the changelog |
+| `auto-complete-fields.yml` | PR to `main` | on a `release/x.x.x` branch `VERSION` must be a new tag; assigns, labels and fills the changelog |
 | `create-tag-and-release.yml` | PR merged into `main` | tag `vX.Y.Z` + release with the source tarball and `SHA256SUMS` |
 
 Every action is pinned to a full commit hash; Dependabot proposes the bumps monthly.
 
 ### Releasing
 
-Bump `VERSION` in the PR. Merging into `main` creates the tag and the release; a PR whose `VERSION`
-already has a tag fails the "VERSION is new" check.
+Bump `VERSION` in a PR from a `release/x.x.x` branch. Merging into `main` creates the tag and the
+release; on that branch, a `VERSION` that already has a tag fails the "VERSION is new" check. PRs
+from any other branch skip that check, and merging them releases nothing while `VERSION` stays the same.
 
 ## Usage
 
