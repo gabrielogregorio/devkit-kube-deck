@@ -49,7 +49,7 @@ Agents never run `kd sh`, `kubectl exec` or anything that writes on a real clust
   (`ui/src/i18n.js`, checked by `i18n.test.js`); tray text through `tr()` in `tray_icon.py`.
 - Python: standard library only at runtime, ruff (line 120). Bash: `set -uo pipefail`, shellcheck clean.
 - Commits: one line, imperative, English.
-- `VERSION`, `pyproject.toml` and `ui/package.json` carry the same version; the PR must bump `VERSION`.
+- `VERSION`, `pyproject.toml` and `ui/package.json` carry the same version; a `release/x.x.x` PR must bump `VERSION`.
 - No `rm` on user files: old files go to `./trash/` (git-ignored).
 
 ## Traps already paid for
