@@ -22,6 +22,12 @@
 [![Lint](https://github.com/gabrielogregorio/devkit-kube-deck/actions/workflows/check-quality.yml/badge.svg)](https://github.com/gabrielogregorio/devkit-kube-deck/actions/workflows/check-quality.yml)
 [![CodeQL](https://github.com/gabrielogregorio/devkit-kube-deck/actions/workflows/codeql-analysis.yml/badge.svg)](https://github.com/gabrielogregorio/devkit-kube-deck/actions/workflows/codeql-analysis.yml)
 
+<br>
+
+<img src="docs/demo.gif" alt="Animated demo of the web interface: the cluster overview, the panel with the kubectl commands behind the screen, the pod list with the broken pod first, the pod panel with events and YAML, and the Terminal tab asking before it opens a shell, where Cancel leaves the message that nothing ran inside the cluster" width="820">
+
+<sub>Recorded with the real server and interface against the fake kubectl of the tests: no real cluster, sample data only.</sub>
+
 </div>
 
 ## About
